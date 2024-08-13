@@ -51,7 +51,7 @@ function ViewOrderDetails() {
 
     setLoading(true);
     try {
-      const response = await fetch('https://fzqdr3wfgl.execute-api.us-east-1.amazonaws.com/fetch-order', {
+      const response = await fetch('https://w5hpy8syqa.execute-api.us-east-1.amazonaws.com/fetch-order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -44,7 +44,7 @@ const MedicineOrder: React.FC = () => {
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
       // Send the request to the backend
-      const response = await fetch('https://fzqdr3wfgl.execute-api.us-east-1.amazonaws.com/start-order', {
+      const response = await fetch('https://w5hpy8syqa.execute-api.us-east-1.amazonaws.com/start-order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
