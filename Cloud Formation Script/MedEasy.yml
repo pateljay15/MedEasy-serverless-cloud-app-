@@ -1,0 +1,1440 @@
+Resources:
+  StorePrescriptionImageFunctionTest:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: StorePrescriptionImageFunctionTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          // Import the AWS SDK modules using CommonJS syntax
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+
+          // Initialize AWS SDK clients
+          const s3Client = new S3Client({ region: 'us-east-1' });
+          const client = new DynamoDBClient({});
+          const dynamo = DynamoDBDocumentClient.from(client);
+
+          const tableName = "Orders";
+          const bucketName = "prescription-bucket-15";
+
+          // Define the Lambda function handler using CommonJS
+          exports.handler = async (event, context) => {
+            let body;
+            let statusCode = 200;
+            const headers = { "Content-Type": "application/json" };
+
+            try {
+              // Parse the incoming event body
+              let requestJSON = JSON.parse(event.body);
+              console.log(requestJSON);
+
+              // Decode the base64 image and upload it to S3
+              let base64Encoded = requestJSON.image;
+              const buffer = Buffer.from(base64Encoded, 'base64');
+              await s3Client.send(new PutObjectCommand({
+                Bucket: bucketName, 
+                Key: requestJSON.fileName, 
+                Body: buffer 
+              }));
+
+              // Store order information in DynamoDB
+              await dynamo.send(new PutCommand({
+                TableName: tableName,
+                Item: {
+                  OrderId: requestJSON.orderid,
+                  prescriptionUrl: "https://prescription-bucket-15.s3.amazonaws.com/" + requestJSON.fileName,
+                  fileName: requestJSON.fileName,
+                  customerEmail: requestJSON.customerEmail,
+                  orderStatus: "Pending",
+                  orderDate: new Date().toISOString()
+                }
+              }));
+
+              // Prepare the successful response body
+              body = {
+                message: "Order processed successfully",
+                order: {
+                  OrderId: requestJSON.orderid,
+                  prescriptionUrl: "https://prescription-bucket-15.s3.amazonaws.com/" + requestJSON.fileName,
+                  fileName: requestJSON.fileName,
+                  customerEmail: requestJSON.customerEmail
+                }
+              };
+            } catch (err) {
+              // Handle errors and set the response body
+              statusCode = 400;
+              body = err.message;
+            } finally {
+              // Convert the body to JSON string
+              body = JSON.stringify(body);
+            }
+
+            return {
+              statusCode,
+              body,
+              headers
+            };
+          };
+
+  ExtractMedicineDetailsFunctionTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Extract-Medicine-DetailsTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          // Import required AWS SDK clients and commands for Node.js using CommonJS syntax
+          const { AnalyzeDocumentCommand } = require("@aws-sdk/client-textract");
+          const { TextractClient } = require("@aws-sdk/client-textract");
+
+          // Set the AWS Region.
+          const REGION = "us-east-1";
+
+          // Create Textract client
+          const textractClient = new TextractClient({ region: REGION });
+
+          const bucket = 'prescription-bucket-15';
+
+          // Define the Lambda function handler
+          exports.handler = async (event, context) => {
+            let body;
+            let statusCode = 200;
+            const headers = {
+              "Content-Type": "application/json",
+            };
+
+            try {
+              let requestJSON = JSON.parse(event.body);
+              console.log(requestJSON);
+
+              // Set params for the Textract document analysis
+              const params = {
+                Document: {
+                  S3Object: {
+                    Bucket: bucket,
+                    Name: requestJSON.order.fileName,
+                  },
+                },
+                FeatureTypes: ['TABLES', 'FORMS', 'SIGNATURES'],
+              };
+
+              const analyzeDoc = new AnalyzeDocumentCommand(params);
+              const response = await textractClient.send(analyzeDoc);
+              
+              // Extract information from the response
+              const result = await displayBlockInfo(response);
+
+              body = {
+                medRes: result,
+                orderDetailes: requestJSON.order,
+              };
+            } catch (err) {
+              console.log("Error", err);
+              statusCode = 400;
+              body = err.message;
+            } finally {
+              body = JSON.stringify(body);
+            }
+
+            return {
+              statusCode,
+              body,
+              headers,
+            };
+          };
+
+          // Function to process the Textract response
+          const displayBlockInfo = async (response) => {
+            try {
+              const result = [];
+              const words = [];
+
+              response.Blocks.forEach(block => {
+                if (block.BlockType === "WORD" && "Text" in block && block.Text !== undefined) {
+                  if (!block.Text.includes("mg")) {
+                    words.push(block.Text);
+                    if (words.length === 4) { // Now expecting four words: name, power, quantity, type
+                      const medicine = {
+                        medicineName: words[0],
+                        medicinePower: words[1],
+                        medicineQuantity: words[2],
+                        medicineType: words[3],
+                      };
+                      if (medicine.medicineName !== "Medicine") {
+                        result.push(medicine);
+                      }
+                      words.length = 0; // Clear the array for the next set of words
+                    }
+                  }
+                }
+              });
+
+              return result;
+            } catch (err) {
+              console.log("Error", err);
+              return [];
+            }
+          };
+
+  MedicineMatchingFunctionTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MedicineMatchingTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          // Import required AWS SDK clients and commands using CommonJS syntax
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, UpdateCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+          const { S3Client } = require("@aws-sdk/client-s3");
+
+          // Initialize AWS SDK clients
+          const s3Client = new S3Client({ region: 'us-east-1' });
+          const client = new DynamoDBClient({ region: 'us-east-1' });
+          const dynamo = DynamoDBDocumentClient.from(client);
+
+          const tableName = "MedicineInventory";
+          const bucketName = "prescription-bucket-15";
+
+          // Define the Lambda function handler using CommonJS
+          exports.handler = async (event, context) => {
+            let body;
+            let statusCode = 200;
+            const headers = {
+              "Content-Type": "application/json",
+            };
+
+            try {
+              // Parse the incoming event body
+              const requestJSON = JSON.parse(event.body);
+              console.log(requestJSON);
+
+              // Fetch the inventory from DynamoDB
+              const params = { TableName: tableName };
+              const data = await dynamo.send(new ScanCommand(params));
+              console.log("Success", data.Items);
+
+              const inventory = data.Items;
+              const prescriptionMed = requestJSON.medRes;
+
+              let medDetails = [];
+              let unavailableMeds = [];
+
+              // Process each medicine in the prescription
+              for (const pmed of prescriptionMed) {
+                let found = false;
+                for (const seller of inventory) {
+                  for (const medicine of seller.medicineStock) {
+                    if (pmed.medicineName.toLowerCase() === medicine.medicineName.toLowerCase()) { // Case insensitive match
+                      const x = parseInt(pmed.medicineQuantity);
+                      const y = parseInt(medicine.availableQuantity);
+                      let z = y - x;
+                      let userWant, userGot, sellerLoss;
+
+                      if (z < 0) {
+                        userGot = y;
+                        userWant = y + Math.abs(z);
+                        sellerLoss = Math.abs(z);
+                        medicine.availableQuantity = 0;
+                      } else {
+                        userGot = x;
+                        userWant = x;
+                        sellerLoss = 0;
+                        medicine.availableQuantity -= x;
+                      }
+
+                      const gotMed = {
+                        medicineName: medicine.medicineName,
+                        medicinePower: medicine.medicinePower,
+                        gotQuantity: userGot,
+                        userWant: userWant,
+                        totalPrice: userGot * parseInt(medicine.medicinePrice),
+                        sellerName: seller.sellerName,
+                        sellerEmail: seller.sellerEmail,
+                        sellerLoss: sellerLoss
+                      };
+
+                      // Update the seller's medicineStock in DynamoDB
+                      const updateParams = {
+                        TableName: tableName,
+                        Key: {
+                          "sellerId": seller.sellerId  // Assuming sellerId is a key attribute for the table
+                        },
+                        UpdateExpression: "set medicineStock = :ms",
+                        ExpressionAttributeValues: {
+                          ":ms": seller.medicineStock
+                        },
+                        ReturnValues: "UPDATED_NEW"
+                      };
+
+                      await dynamo.send(new UpdateCommand(updateParams));
+                      medDetails.push(gotMed);
+                      found = true;
+                      break; // Exit the inner loop after finding the medicine
+                    }
+                  }
+                  if (found) break; // Exit the outer loop if medicine is found
+                }
+                if (!found) {
+                  unavailableMeds.push(pmed);
+                }
+              }
+
+              console.log(medDetails);
+              console.log(unavailableMeds);
+
+              body = {
+                medDetails,
+                unavailableMeds,
+                orderDetails: requestJSON.orderDetailes
+              };
+            } catch (err) {
+              console.log("Error", err);
+              statusCode = 400;
+              body = { error: err.message };
+            } finally {
+              body = JSON.stringify(body);
+            }
+
+            return {
+              statusCode,
+              body,
+              headers,
+            };
+          };
+
+
+  ProcessMedicineOrderFunctionTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Process-Medicine-OrderTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          // Import required AWS SDK clients and commands using CommonJS syntax
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const {
+            DynamoDBDocumentClient,
+            PutCommand,
+            GetCommand,
+            UpdateCommand
+          } = require("@aws-sdk/lib-dynamodb");
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+
+          // Initialize AWS SDK clients
+          const s3Client = new S3Client({ region: 'us-east-1' });
+
+          const client = new DynamoDBClient({});
+          const dynamo = DynamoDBDocumentClient.from(client);
+
+          const tableName = "Orders";
+          const bucketName = "prescription-bucket-15";
+
+          // Define the Lambda function handler using CommonJS
+          exports.handler = async (event, context) => {
+            let body;
+            let statusCode = 200;
+            const headers = {
+              "Content-Type": "application/json",
+            };
+
+            try {
+              let requestJSON = JSON.parse(event.body);
+              console.log(requestJSON);
+              let OrderId = requestJSON.orderDetails.OrderId;
+
+              const params = {
+                TableName: tableName,
+                Key: {
+                  "OrderId": OrderId
+                }
+              };
+
+              // Fetch the data from DynamoDB
+              const data = await dynamo.send(new GetCommand(params));
+              console.log("Success", data.Item);
+
+              let medDetails = requestJSON.medDetails;
+              let unavailableMeds = requestJSON.unavailableMeds;
+              let medicinePurchased = [];
+              let incompleteOrder = []
+              
+              let orderStatus = "Processing";
+              let orderTotal = 0.0
+              
+              for (let med of medDetails) {
+                let medicine = {
+                  medicineName: med.medicineName,
+                  medicinePower: med.medicinePower,
+                  gotQuantity: med.gotQuantity,
+                  userWant: med.userWant,
+                  totalPrice: med.totalPrice,
+                  sellerName: med.sellerName,
+                  sellerEmail: med.sellerEmail,
+                };
+
+                if (med.sellerLoss > 0) {
+                  orderStatus = "Partially Accepted"
+                  incompleteOrder.push(medicine)
+                  console.log(`user want ${med.medicineName} in ${med.userWant} quantity but received ${med.gotQuantity}.`);
+                }
+                
+                orderTotal = orderTotal + med.totalPrice
+                medicinePurchased.push(medicine);
+              }
+
+              for (let med of unavailableMeds) {
+                orderStatus = "Partially Accepted"
+                console.log(`user want ${med.medicineName} in ${med.medicineQuantity} quantity but no stock is available with any seller.`);
+              }
+
+              // Update the order in DynamoDB with new fields
+              const updateParams = {
+                TableName: tableName,
+                Key: {
+                  "OrderId": OrderId
+                },
+                UpdateExpression: "set medicinePurchased = :mp, updatedAt = :ua, orderStatus = :os, orderTotal = :ot",
+                ExpressionAttributeValues: {
+                  ":mp": medicinePurchased,
+                  ":ua": new Date().toISOString(),
+                  ":os": orderStatus,
+                  ":ot": orderTotal
+                },
+                ReturnValues: "UPDATED_NEW"
+              };
+
+              const updateResult = await dynamo.send(new UpdateCommand(updateParams));
+              console.log("Update Success", updateResult);
+
+              body = {
+                ...data.Item,
+                ...updateResult.Attributes,
+                incompleteOrder,
+                unavailableMeds
+              };
+            } catch (err) {
+              statusCode = 400;
+              body = err.message;
+            } finally {
+              body = JSON.stringify(body);
+            }
+
+            return {
+              statusCode,
+              body,
+              headers,
+            };
+          };
+
+
+  SendOrderConfirmationEventFunctionTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SendOrderConfirmationEventTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          // Import required AWS SDK clients and commands using CommonJS syntax
+          const { EventBridgeClient, PutEventsCommand } = require("@aws-sdk/client-eventbridge");
+
+          // Initialize the EventBridge client
+          const eventBridge = new EventBridgeClient({ region: "us-east-1" });
+
+          // Define the Lambda function handler using CommonJS
+          exports.handler = async (event) => {
+            let response;
+            try {
+              let requestJSON = JSON.parse(event.body);
+              console.log(requestJSON);
+
+              // Build the message details from requestJSON
+              const messageDetails = buildMessageDetails(requestJSON);
+              console.log(messageDetails);
+
+              // Send the event with message details to EventBridge
+              await putEvent(messageDetails);
+
+              // Notify sellers about low stock
+              await notifySellers(requestJSON);
+
+              response = {
+                statusCode: 200,
+                body: JSON.stringify('Hello from Lambda!'),
+              };
+            } catch (err) {
+              console.error('Error:', err);
+              response = {
+                statusCode: 500,
+                body: JSON.stringify('Internal Server Error'),
+              };
+            }
+            return response;
+          };
+
+          // Function to build the message details for EventBridge
+          const buildMessageDetails = (requestJSON) => {
+            const {
+              orderDate,
+              prescriptionUrl,
+              fileName,
+              customerEmail,
+              orderStatus,
+              OrderId,
+              orderTotal,
+              updatedAt,
+              medicinePurchased,
+              incompleteOrder,
+              unavailableMeds
+            } = requestJSON;
+
+            const htmlContent = `
+              <h1>Order Notification</h1>
+              <p><strong>Order Date:</strong> ${orderDate}</p>
+              <p><strong>Order ID:</strong> ${OrderId}</p>
+              <p><strong>Order Status:</strong> ${orderStatus}</p>
+              <p><strong>Order Total:</strong> $${orderTotal}</p>
+              <p><strong>Last Updated:</strong> ${updatedAt}</p>
+              <p><strong>Prescription:</strong> <a href="${prescriptionUrl}">${fileName}</a></p>
+              <h2>Medicine Purchased</h2>
+              <ul>
+                ${medicinePurchased.map(med => `
+                  <li>
+                    <strong>Medicine Name:</strong> ${med.medicineName}<br>
+                    <strong>Medicine Power:</strong> ${med.medicinePower}<br>
+                    <strong>Quantity Wanted:</strong> ${med.userWant}<br>
+                    <strong>Quantity Got:</strong> ${med.gotQuantity}<br>
+                    <strong>Total Price:</strong> $${med.totalPrice}<br>
+                    <strong>Seller Name:</strong> ${med.sellerName}<br>
+                    <strong>Seller Email:</strong> ${med.sellerEmail}<br>
+                  </li>
+                `).join('')}
+              </ul>
+              <h2>Incomplete Order</h2>
+              <ul>
+                ${incompleteOrder.map(med => `
+                  <li>
+                    <strong>Medicine Name:</strong> ${med.medicineName}<br>
+                    <strong>Medicine Power:</strong> ${med.medicinePower}<br>
+                    <strong>Quantity Wanted:</strong> ${med.userWant}<br>
+                    <strong>Quantity Got:</strong> ${med.gotQuantity}<br>
+                    <strong>Total Price:</strong> $${med.totalPrice}<br>
+                    <strong>Seller Name:</strong> ${med.sellerName}<br>
+                    <strong>Seller Email:</strong> ${med.sellerEmail}<br>
+                  </li>
+                `).join('')}
+              </ul>
+              <h2>Unavailable Medicines</h2>
+              <ul>
+                ${unavailableMeds.length === 0 ? '<li>None</li>' : unavailableMeds.map(med => `
+                  <li>
+                    <strong>Medicine Name:</strong> ${med.medicineName}<br>
+                  </li>
+                `).join('')}
+              </ul>
+            `;
+
+            return {
+              customerEmail,
+              message: htmlContent,
+              subject: 'Your Order Details'
+            };
+          };
+
+          // Function to notify sellers about low stock
+          const notifySellers = async (requestJSON) => {
+            const { incompleteOrder } = requestJSON;
+
+            // Aggregate low stock information by seller
+            const sellerNotifications = {};
+
+            incompleteOrder.forEach(med => {
+              if (!sellerNotifications[med.sellerEmail]) {
+                sellerNotifications[med.sellerEmail] = {
+                  sellerName: med.sellerName,
+                  medicines: []
+                };
+              }
+              sellerNotifications[med.sellerEmail].medicines.push(med);
+            });
+
+            // Generate and send notifications to each seller
+            for (const sellerEmail in sellerNotifications) {
+              const seller = sellerNotifications[sellerEmail];
+              const htmlContent = `
+                <h1>Low Stock Notification</h1>
+                <p>Dear ${seller.sellerName},</p>
+                <p>The following medicines are low in stock:</p>
+                <ul>
+                  ${seller.medicines.map(med => `
+                    <li>
+                      <strong>Medicine Name:</strong> ${med.medicineName}<br>
+                      <strong>Medicine Power:</strong> ${med.medicinePower}<br>
+                      <strong>Quantity Wanted By User Who Placed Order Recently:</strong> ${med.userWant}<br>
+                      <strong>Quantity Got By User Who Placed Order Recently:</strong> ${med.gotQuantity}<br>
+                    </li>
+                  `).join('')}
+                </ul>
+                <p>Please restock these items as soon as possible.</p>
+              `;
+
+              const lowStockLevelMessageDetails = {
+                customerEmail: sellerEmail,
+                subject: 'Low Stock Notification',
+                message: htmlContent
+              };
+
+              await putEvent(lowStockLevelMessageDetails);
+            }
+          };
+
+          // Function to put an event to EventBridge
+          const putEvent = async (messageDetails) => {
+            const params = {
+              Entries: [
+                {
+                  Source: "order.confirmation.source",
+                  DetailType: 'UserOrderConfirmation',
+                  Detail: JSON.stringify(messageDetails),
+                  EventBusName: 'default'
+                }
+              ]
+            };
+
+            try {
+              const data = await eventBridge.send(new PutEventsCommand(params));
+              console.log('Event sent:', data);
+            } catch (err) {
+              console.error('Failed to send event:', err);
+              throw err; // Rethrow the error to be caught in the handler
+            }
+          };
+
+
+  MedicineOrderApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: MedicineOrderHttpApi
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - OPTIONS
+          - POST
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+        MaxAge: 86400 # 1 day
+        AllowCredentials: False
+
+  MedicineOrderWorkflowIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      IntegrationType: AWS_PROXY
+      IntegrationSubtype: StepFunctions-StartExecution
+      CredentialsArn: "arn:aws:iam::835573539094:role/LabRole"
+      RequestParameters:
+        Input: "$request.body"
+        StateMachineArn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:MedicineOrderWorkflowTest"
+      PayloadFormatVersion: "1.0"
+
+  MedicineOrderWorkflowRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      RouteKey: "POST /start-order"
+      Target: !Sub "integrations/${MedicineOrderWorkflowIntegration}"
+
+  MedicineOrderApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  MedicineOrderStateMachineTest:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: MedicineOrderWorkflowTest
+      RoleArn: "arn:aws:iam::835573539094:role/LabRole"
+      StateMachineType: STANDARD
+      DefinitionString: !Sub |
+        {
+          "Comment": "A description of my state machine",
+          "StartAt": "Store Prescription Image",
+          "States": {
+            "Store Prescription Image": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${StorePrescriptionImageFunctionTest.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Extract Medicine Details"
+            },
+            "Extract Medicine Details": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${ExtractMedicineDetailsFunctionTest.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Medicine Matching"
+            },
+            "Medicine Matching": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${MedicineMatchingFunctionTest.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Process Medicine Order"
+            },
+            "Process Medicine Order": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${ProcessMedicineOrderFunctionTest.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Send Order Confirmation Event"
+            },
+            "Send Order Confirmation Event": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${SendOrderConfirmationEventFunctionTest.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: "arn:aws:logs:us-east-1:835573539094:log-group:/aws/states/MedicineOrderWorkflowTest:*"
+      TracingConfiguration:
+        Enabled: true
+
+  MedicineOrderWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/states/MedicineOrderWorkflowTest
+      RetentionInDays: 14
+
+
+# SNS Topic 
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SendOrderStatusDetailTest
+
+  # SNS Topic Policy
+  EventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Ref: MySNSTopic
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: MySNSTopic
+
+  # EventBridge Rule 
+  SendEventToSNSTopicTest:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: SendEventToSNSTopicTest
+      EventPattern:
+        source:
+          - "order.confirmation.source"
+        detail-type:
+          - "UserOrderConfirmation"
+        detail:
+          customerEmail:
+            - exists: true
+      State: ENABLED
+      Targets:
+        - Id: SendOrderStatusDetail
+          Arn: 
+            Ref: MySNSTopic
+
+  # Lambda Function
+  SendOrderConfirmationEmailSNSTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SendOrderConfirmationEmailSNSTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"  # Use LabRole for permissions
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        S3Bucket: lambdas-function-code
+        S3Key: sendEmailHandlerSNS.zip
+
+  # SNS Subscription to Lambda
+  SNSTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn:
+        Ref: MySNSTopic
+      Protocol: lambda
+      Endpoint: 
+        Fn::GetAtt:
+          - SendOrderConfirmationEmailSNSTest
+          - Arn
+
+  # Lambda Permission for SNS to Invoke
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: 
+        Ref: SendOrderConfirmationEmailSNSTest
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: 
+        Ref: MySNSTopic
+
+
+# New EventBridge Rule
+  OrderStatusUpdateRuleTest:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: OrderStatusUpdateRuleTest
+      EventPattern:
+        source:
+          - "myapplication.orders"
+        detail-type:
+          - "OrderStatusUpdate"
+        detail:
+          status:
+            - "Processing"
+            - "Shipped"
+            - "Delivered"
+      State: ENABLED
+      Targets:
+        - Id: SendOrderStatusDetail
+          Arn: 
+            Ref: MySNSTopic
+        - Id: OrderStatusUpdateHandlerTest
+          Arn: 
+            Fn::GetAtt:
+              - OrderStatusUpdateHandlerTest
+              - Arn
+
+  # Lambda Function for Order Status Update 
+  OrderStatusUpdateHandlerTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: OrderStatusUpdateHandlerTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"  # Use LabRole for permissions
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          const { DynamoDBClient, UpdateItemCommand, GetItemCommand } = require("@aws-sdk/client-dynamodb");
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+
+          const dynamodb = new DynamoDBClient({ region: "us-east-1" });
+          const s3Client = new S3Client({ region: 'us-east-1' });
+
+          const handler = async (event) => {
+              console.log(event);
+
+              const orderId = event.detail.OrderId;
+              const newStatus = event.detail.status;
+              const customerEmail = event.detail.customerEmail;
+              const timestamp = new Date().toISOString();
+
+              // Update DynamoDB table
+              const updateParams = {
+                  TableName: 'Orders',
+                  Key: {
+                      'OrderId': { S: orderId }
+                  },
+                  UpdateExpression: 'SET orderStatus = :status, updatedAt = :timestamp',
+                  ExpressionAttributeValues: {
+                      ':status': { S: newStatus },
+                      ':timestamp': { S: timestamp }
+                  }
+              };
+
+              try {
+                  await dynamodb.send(new UpdateItemCommand(updateParams));
+
+                  // Archive data to S3 if status is Delivered
+                  if (newStatus === 'Delivered') {
+                      const orderData = await getOrderData(orderId);
+                      const s3Params = {
+                          Bucket: 'my-orders-archive',
+                          Key: `${orderId}.json`,
+                          Body: JSON.stringify(orderData)
+                      };
+                      await s3Client.send(new PutObjectCommand(s3Params));
+                  }
+
+                  // Create the message
+                  // const message = {
+                  //     customerEmail: customerEmail,
+                  //     subject: 'Order Status Update',
+                  //     message: `Your order ${orderId} status is now ${newStatus}`
+                  // };
+
+                  return {
+                      statusCode: 200,
+                      body: JSON.stringify('Order status updated successfully')
+                  };
+              } catch (err) {
+                  console.error('Error:', err);
+                  return {
+                      statusCode: 500,
+                      body: JSON.stringify('Internal Server Error')
+                  };
+              }
+          };
+
+          const getOrderData = async (orderId) => {
+              const getParams = {
+                  TableName: 'Orders',
+                  Key: {
+                      'OrderId': { S: orderId }
+                  }
+              };
+              const data = await dynamodb.send(new GetItemCommand(getParams));
+              return data.Item;
+          };
+
+          module.exports = { handler };
+
+  # Lambda Permission for EventBridge to Invoke Order Status Update Handler
+  LambdaInvokePermissionForOrderStatusUpdate:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: 
+        Ref: OrderStatusUpdateHandlerTest
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: 
+        Fn::GetAtt:
+          - OrderStatusUpdateRuleTest
+          - Arn
+
+
+# Lambda Function for Inventory Alerts 
+  InventoryAlertsTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: InventoryAlertsTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"  # Use LabRole for permissions
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          const { DynamoDBClient, ScanCommand } = require("@aws-sdk/client-dynamodb");
+          const { SNSClient, PublishCommand } = require("@aws-sdk/client-sns");
+
+          const dynamoDBClient = new DynamoDBClient({ region: "us-east-1" });
+          const snsClient = new SNSClient({ region: "us-east-1" });
+          const snsTopicArn = 'arn:aws:sns:us-east-1:835573539094:SendOrderStatusDetail'; // Replace with your SNS topic ARN
+
+          const handler = async (event) => {
+            let response;
+            try {
+              const sellers = await fetchSellersInventory();
+
+              const lowStockMeds = [];
+              sellers.forEach(seller => {
+                const lowStock = seller.inventory.filter(med => med.availableQuantity < 10);
+                if (lowStock.length > 0) {
+                  lowStockMeds.push({
+                    sellerEmail: seller.email,
+                    medicines: lowStock
+                  });
+                }
+              });
+
+              await Promise.all(lowStockMeds.map(seller => publishToSNSTopic(seller.sellerEmail, seller.medicines)));
+
+              response = {
+                statusCode: 200,
+                body: JSON.stringify('Messages sent to SNS topic successfully'),
+              };
+            } catch (err) {
+              console.error('Error:', err);
+              response = {
+                statusCode: 500,
+                body: JSON.stringify('Internal Server Error'),
+              };
+            }
+            return response;
+          };
+
+          const fetchSellersInventory = async () => {
+            const params = {
+              TableName: "MedicineInventory", // Replace with your DynamoDB table name
+            };
+
+            try {
+              const data = await dynamoDBClient.send(new ScanCommand(params));
+              return data.Items.map(item => ({
+                email: item.sellerEmail.S,
+                inventory: item.medicineStock.L.map(med => ({
+                  medicineName: med.M.medicineName.S,
+                  availableQuantity: parseInt(med.M.availableQuantity.N)
+                }))
+              }));
+            } catch (err) {
+              console.error('Failed to fetch inventory:', err);
+              throw err;
+            }
+          };
+
+          const publishToSNSTopic = async (email, medicines) => {
+            const htmlContent = `
+              <h1>Low Stock Notification</h1>
+              <p>The following medicines have low stock:</p>
+              <ul>
+                ${medicines.map(med => `
+                  <li>
+                    <strong>Medicine Name:</strong> ${med.medicineName}<br>
+                    <strong>Available Quantity:</strong> ${med.availableQuantity}<br>
+                  </li>
+                `).join('')}
+              </ul>
+            `;
+
+            const message = {
+              customerEmail: email,
+              subject: 'Low Stock Notification',
+              message: htmlContent
+            };
+
+            const params = {
+              Message: JSON.stringify(message),
+              TopicArn: snsTopicArn,
+            };
+
+            try {
+              const data = await snsClient.send(new PublishCommand(params));
+              console.log(`Message sent to SNS topic for ${email}:`, data);
+            } catch (err) {
+              console.error(`Failed to send message to SNS topic for ${email}:`, err);
+              throw err;
+            }
+          };
+
+          module.exports = { handler };
+
+
+  # Scheduled EventBridge Rule 
+  PeriodicInventoryAlertsTest:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: PeriodicInventoryAlertsTest
+      ScheduleExpression: rate(12 hours)  # Runs every 12 hours
+      State: ENABLED
+      Targets:
+        - Id: InventoryAlertsTarget
+          Arn: 
+            Fn::GetAtt:
+              - InventoryAlertsTest
+              - Arn
+
+  # Lambda Permission for EventBridge to Invoke Inventory Alerts
+  LambdaInvokePermissionForInventoryAlerts:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: 
+        Ref: InventoryAlertsTest
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: 
+        Fn::GetAtt:
+          - PeriodicInventoryAlertsTest
+          - Arn
+
+
+  PrescriptionBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: "prescription-bucket-15"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  PublicReadBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref PrescriptionBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${PrescriptionBucket}/*"
+
+  
+
+  MyOrdersArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-orders-archive
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+  
+  MedicineInventoryTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties: 
+      TableName: "MedicineInventory"
+      AttributeDefinitions: 
+        - 
+          AttributeName: "sellerId"
+          AttributeType: "S"
+      KeySchema: 
+        - 
+          AttributeName: "sellerId"
+          KeyType: "HASH"
+      ProvisionedThroughput: 
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  
+  OrdersTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties: 
+      TableName: "Orders"
+      AttributeDefinitions: 
+        - 
+          AttributeName: "OrderId"
+          AttributeType: "S"
+      KeySchema: 
+        - 
+          AttributeName: "OrderId"
+          KeyType: "HASH"
+      ProvisionedThroughput: 
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Lambda Function 
+  SendOrderStatusUpdateEventTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SendOrderStatusUpdateEventTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"  # Use LabRole for permissions
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          const { EventBridgeClient, PutEventsCommand } = require("@aws-sdk/client-eventbridge");
+
+          // Initialize the EventBridge client
+          const eventBridge = new EventBridgeClient({ region: "us-east-1" });
+
+          /**
+          * AWS Lambda handler function to send an event to EventBridge.
+          * @param {Object} event - The event object containing the request data.
+          * @returns {Object} - The response object with status code and message.
+          */
+          const handler = async (event) => {
+            let response;
+            try {
+              // Parse the incoming request JSON
+              const requestJSON = JSON.parse(event.body);
+              console.log("Request JSON:", requestJSON);
+
+              // Prepare the event details
+              const eventDetails = {
+                source: "myapplication.orders",
+                detailType: "OrderStatusUpdate",
+                detail: {
+                  OrderId: requestJSON.detail.OrderId,
+                  status: requestJSON.detail.status || "Processing", // Default status if not provided
+                  customerEmail: requestJSON.detail.customerEmail,
+                  subject: requestJSON.detail.subject || "Order Update",
+                  message: requestJSON.detail.message || "Your order is being processed.",
+                },
+              };
+
+              // Send the event to EventBridge
+              await putEvent(eventDetails);
+
+              // Construct the success response
+              response = {
+                statusCode: 200,
+                body: JSON.stringify("Event sent to EventBridge successfully!"),
+              };
+            } catch (err) {
+              // Log the error and construct the failure response
+              console.error("Error:", err);
+              response = {
+                statusCode: 500,
+                body: JSON.stringify("Internal Server Error"),
+              };
+            }
+            return response;
+          };
+
+          /**
+          * Sends an event to EventBridge.
+          * @param {Object} eventDetails - The details of the event to be sent.
+          * @throws Will throw an error if sending the event fails.
+          */
+          const putEvent = async (eventDetails) => {
+            const params = {
+              Entries: [
+                {
+                  Source: eventDetails.source,
+                  DetailType: eventDetails.detailType,
+                  Detail: JSON.stringify(eventDetails.detail),
+                  EventBusName: "default", // Change to your Event Bus name if not using the default bus
+                },
+              ],
+            };
+
+            try {
+              const data = await eventBridge.send(new PutEventsCommand(params));
+              console.log("Event sent:", data);
+            } catch (err) {
+              // Log the error and rethrow it for further handling
+              console.error("Failed to send event:", err);
+              throw err; // Rethrow the error to be caught in the handler
+            }
+          };
+
+          // Export the handler function
+          module.exports = { handler };
+
+
+  SendOrderStatusUpdateEventTestIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      IntegrationType: AWS_PROXY
+      CredentialsArn: "arn:aws:iam::835573539094:role/LabRole"
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SendOrderStatusUpdateEventTest.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  # API Gateway Route
+  SendOrderStatusUpdateEventTestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      RouteKey: "POST /send-order-update"
+      Target: !Sub "integrations/${SendOrderStatusUpdateEventTestIntegration}"
+
+  # Lambda Function for Inventory Alerts with "Test" Suffix
+  FetchOrderDetailsTest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: FetchOrderDetailsTest
+      Role: "arn:aws:iam::835573539094:role/LabRole"  # Use LabRole for permissions
+      Handler: index.handler
+      Runtime: nodejs20.x
+      MemorySize: 128
+      Timeout: 30
+      Code:
+        ZipFile: |
+          const { DynamoDBClient, GetItemCommand } = require("@aws-sdk/client-dynamodb");
+          const { unmarshall } = require("@aws-sdk/util-dynamodb"); // To convert DynamoDB AttributeValue to JS object
+
+          // Initialize the DynamoDB client
+          const dynamodb = new DynamoDBClient({ region: "us-east-1" });
+
+          // Lambda handler function
+          const handler = async (event) => {
+            console.log("Event received:", event);
+
+            let response;
+
+            try {
+              // Parse the incoming request to get OrderId
+              const { orderId } = JSON.parse(event.body);
+
+              if (!orderId) {
+                throw new Error("OrderId is required");
+              }
+
+              // Fetch order details from DynamoDB
+              const orderData = await getOrderData(orderId);
+
+              // Check if order details were found
+              if (!orderData) {
+                response = {
+                  statusCode: 404,
+                  body: JSON.stringify({ message: "Order not found" }),
+                };
+              } else {
+                // Format the response with the order details
+                response = {
+                  statusCode: 200,
+                  body: JSON.stringify(orderData),
+                };
+              }
+            } catch (error) {
+              console.error("Error fetching order details:", error);
+              response = {
+                statusCode: 500,
+                body: JSON.stringify({ message: "Internal Server Error", error: error.message }),
+              };
+            }
+
+            return response;
+          };
+
+          // Function to fetch order data from DynamoDB using the provided OrderId
+          const getOrderData = async (orderId) => {
+            const params = {
+              TableName: "Orders",
+              Key: {
+                OrderId: { S: orderId },
+              },
+            };
+
+            try {
+              // Send the GetItemCommand to DynamoDB
+              const data = await dynamodb.send(new GetItemCommand(params));
+
+              // Return the order data if found, convert AttributeValue to JS object
+              return data.Item ? unmarshall(data.Item) : null;
+            } catch (err) {
+              console.error("Error retrieving order data:", err);
+              throw err;
+            }
+          };
+
+          // Export the handler function
+          module.exports = { handler };
+
+
+  FetchOrderDetailsTestIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      IntegrationType: AWS_PROXY
+      CredentialsArn: "arn:aws:iam::835573539094:role/LabRole"
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FetchOrderDetailsTest.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  # API Gateway Route
+  FetchOrderDetailsTestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref MedicineOrderApi
+      RouteKey: "POST /fetch-order"
+      Target: !Sub "integrations/${FetchOrderDetailsTestIntegration}"
+
