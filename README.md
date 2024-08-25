@@ -1,46 +1,70 @@
-# Getting Started with Create React App
+# MedEasy
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+MedEasy is a cutting-edge cloud-based platform developed to revolutionize the way medicines are ordered online. By harnessing the power of AWS and GCP services, MedEasy automates the entire process—from prescription uploads to final order fulfillment—ensuring a seamless and efficient experience for both users and sellers.
 
-## Available Scripts
+## Objective
 
-In the project directory, you can run:
+MedEasy – a comprehensive cloud-based platform designed to revolutionize the medicine ordering process. Utilizing hashtag#AWS and hashtag#GCP services, MedEasy automates everything from prescription uploads to final order fulfillment, ensuring a seamless and efficient user experience.
 
-### `npm start`
+The platform not only facilitates easy prescription uploads and medicine ordering but also integrates advanced analytics and real-time notifications to provide a comprehensive and efficient solution. By doing so, MedEasy aims to become the go-to platform for online medicine ordering, delivering convenience, accuracy, and efficiency.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
+## System Architecture Diagram
+![MedEasy Architecture Diagram](https://github.com/pateljay15/MedEasy-serverless-cloud-app-/blob/master/MedEasy%20Architecture%20Diagram/Med%20Easy%20Architecture%20Diagram.png)
 
-The page will reload if you make edits.\
-You will also see any lint errors in the console.
+## Key Features & Modules
 
-### `npm test`
+### 1. Prescription & Order Processing Module
+- **Workflow Orchestration**: Utilizes AWS Step Functions to coordinate the end-to-end process from prescription upload to order fulfillment.
+- **Data Extraction**: Prescription images are stored in Amazon S3, and AWS Textract is used to accurately extract text.
+- **Inventory Matching**: Medications are matched against the inventory stored in Amazon DynamoDB.
+- **Order Processing**: Orders are processed, and order confirmation events are triggered and sent to AWS EventBridge.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+### 2. Inventory & Data Management Module
+- **Data Storage**: Amazon DynamoDB is used for fast and reliable storage of medicine inventory and order details.
 
-### `npm run build`
+### 3. Notification Module
+- **Real-Time Notifications**: AWS Simple Notification Service (SNS) is used to send real-time notifications to users about their orders and to sellers about inventory alerts.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### 4. Event-Driven Architecture
+- **Event Coordination**: AWS EventBridge facilitates event-driven processes, including periodic inventory alerts and order confirmations.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+### 5. Data Storage/Lake
+- **Data Lake**: Amazon S3 serves as a data lake for processed orders and securely stores user prescription images.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### 6. Automatic Infrastructure Provisioning
+- **Serverless Infrastructure**: AWS CloudFormation is used for automatic provisioning of the entire serverless infrastructure, ensuring scalability and consistent management.
 
-### `npm run eject`
+### 7. Data Lake & ETL Module
+- **ETL Pipeline**: AWS Glue is employed for data extraction, transformation, and loading (ETL) to archive order data stored in S3.
+- **Data Insights**: GCP BigQuery and Looker Studio are used to visualize data and generate insights on top-selling medicines.
 
-**Note: this is a one-way operation. Once you `eject`, you can’t go back!**
+## Cloud Architecture Overview
 
-If you aren’t satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+MedEasy is deployed using a Public Cloud model on AWS, utilizing a suite of managed services to ensure cost-efficiency, scalability, and global accessibility. The final architecture integrates several AWS services including API Gateway, Step Functions, Lambda, S3, DynamoDB, Textract, EventBridge, and SNS.
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you’re on your own.
+## Programming Languages
 
-You don’t have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn’t feel obligated to use this feature. However we understand that this tool wouldn’t be useful if you couldn’t customize it when you are ready for it.
+- **Node.js**: For AWS Lambda functions, enabling high-performance, asynchronous operations.
+- **JavaScript (React)**: For the frontend application, delivering a dynamic and responsive user interface.
 
-## Learn More
+## Deployment Details
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+- **Frontend**: Deployed on Netlify, offering scalable and performant delivery of the React-based frontend.
+- **Backend**: The serverless backend infrastructure is deployed on AWS using CloudFormation templates for automated management.
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Future Developments
+
+- **Personalized Recommendations**: Leveraging Amazon Personalize to deliver tailored medicine recommendations to users based on historical order data.
+
+## Getting Started
+
+To deploy MedEasy, follow these steps:
+1. Clone the repository.
+2. Deploy the backend using AWS CloudFormation templates.
+3. Deploy the frontend on Netlify or another preferred platform.
+4. Configure the AWS services as described in the architecture.
+
+## Contact
+
+For more information, please contact Jay Patel at jaypatel45677@gmail.com.
+
